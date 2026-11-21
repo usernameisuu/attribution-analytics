@@ -2,9 +2,9 @@
 import secrets
 import unittest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from app.main import app
-from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent
+from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent, DatasetVersion, AnalysisRun, RunEvent, ModelCall
 from app.security import password_hash
 from app.config import settings
 
@@ -31,7 +31,12 @@ class ApiTests(unittest.TestCase):
         self.client.close()
         ids = [self.user.id, self.other.id, self.viewer.id]
         with SessionFactory() as db:
+            run_ids=select(AnalysisRun.id).where(AnalysisRun.owner_id.in_(ids))
+            db.execute(delete(RunEvent).where(RunEvent.run_id.in_(run_ids)))
+            db.execute(delete(ModelCall).where(ModelCall.run_id.in_(run_ids)))
+            db.execute(delete(AnalysisRun).where(AnalysisRun.owner_id.in_(ids)))
             db.execute(delete(AnalysisSession).where(AnalysisSession.owner_id.in_(ids)))
+            db.execute(delete(DatasetVersion).where(DatasetVersion.owner_id.in_(ids)))
             db.execute(delete(LoginSession).where(LoginSession.user_id.in_(ids)))
             db.execute(delete(AuditEvent).where(AuditEvent.actor_id.in_(ids)))
             db.execute(delete(User).where(User.id.in_(ids))); db.commit()

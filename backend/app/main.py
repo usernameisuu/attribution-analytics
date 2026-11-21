@@ -1,21 +1,20 @@
 from datetime import timedelta
-import hmac
 import secrets
-from typing import Annotated
 from uuid import uuid4
-from fastapi import FastAPI, Depends, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, text
-from sqlalchemy.orm import Session
 from .config import settings
-from .db import database, User, LoginSession, AnalysisSession, AuditEvent, utcnow
+from .db import User, LoginSession, AnalysisSession, AuditEvent, utcnow
 from .security import password_hash, password_matches, token_hash
-from .domain.scenarios import SCENARIOS, calculate, simulate
+from .domain.scenarios import SCENARIOS, calculate
+from .domain.exploration import analyze, default_scope, simulate_snapshot
+from .access import DB, Identity, COOKIE, authorize, owned
+from .pipeline_api import router as pipeline_router, dataset_owned
 
-app = FastAPI(title="经营归因分析系统", version="0.1.0")
-DB = Annotated[Session, Depends(database)]
-COOKIE = "attribution_session"
+app = FastAPI(title="经营归因分析系统", version="0.2.0")
+app.include_router(pipeline_router)
 DUMMY_PASSWORD = password_hash(secrets.token_urlsafe(32))
 
 
@@ -39,38 +38,6 @@ async def http_error(request: Request, exc: HTTPException):
                          "request_id":request.state.request_id}, status_code=exc.status_code)
 
 
-def identity(request: Request, db: DB) -> User:
-    raw = request.cookies.get(COOKIE)
-    login = db.get(LoginSession, token_hash(raw)) if raw else None
-    if not login or login.expires_at <= utcnow():
-        raise HTTPException(401, "请先登录")
-    user = db.get(User, login.user_id)
-    if not user or not user.active:
-        raise HTTPException(401, "账号已停用")
-    if request.method not in {"GET", "HEAD"} and not hmac.compare_digest(request.headers.get("x-csrf-token", ""), login.csrf):
-        raise HTTPException(403, "请求校验失败，请刷新后重试")
-    request.state.login = login
-    return user
-
-
-Identity = Annotated[User, Depends(identity)]
-
-
-def authorize(user: User, scenario: str, write: bool = False):
-    if scenario not in SCENARIOS or scenario not in user.domains:
-        raise HTTPException(403, "无权访问该业务线")
-    if write and user.role != "analyst":
-        raise HTTPException(403, "当前角色不能创建分析或模拟")
-
-
-def owned(db: Session, user: User, session_id: str) -> AnalysisSession:
-    record = db.scalar(select(AnalysisSession).where(AnalysisSession.id == session_id, AnalysisSession.owner_id == user.id))
-    if not record:
-        raise HTTPException(404, "会话不存在或无权访问")
-    authorize(user, record.scenario)
-    return record
-
-
 class Credentials(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=256)
@@ -78,6 +45,8 @@ class Credentials(BaseModel):
 
 class NewAnalysis(BaseModel):
     scenario: str = Field(max_length=40)
+    dataset_id: str | None = Field(default=None, max_length=36)
+    scope: dict | None = None
 
 
 class Simulation(BaseModel):
@@ -87,7 +56,7 @@ class Simulation(BaseModel):
 @app.get("/api/v1/health")
 def health(db: DB):
     db.execute(text("SELECT 1"))
-    return {"status":"ok", "capabilities":{"deterministic_analysis":True, "model":False, "sandbox":False, "statistics":False}}
+    return {"status":"ok", "capabilities":{"deterministic_analysis":True, "datasets":True, "durable_queue":True, "model_gateway":True, "model_configuration":"worker_only", "sandbox":False, "statistics":False}}
 
 
 @app.post("/api/v1/auth/login")
@@ -134,7 +103,20 @@ def sessions(db: DB, user: Identity):
 @app.post("/api/v1/sessions", status_code=201)
 def create_session(payload: NewAnalysis, db: DB, user: Identity):
     authorize(user, payload.scenario, write=True)
-    snapshot = calculate(payload.scenario)
+    if payload.dataset_id:
+        dataset = dataset_owned(db, user, payload.dataset_id)
+        if dataset.scenario != payload.scenario:
+            raise HTTPException(422, '数据版本与业务线不匹配')
+        try:
+            snapshot = analyze(payload.scenario, dataset.rows, payload.scope or default_scope(dataset.rows), dataset.id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        snapshot['data_digest'] = dataset.digest
+        snapshot['data_kind'] = '合成日聚合样例（非真实业务）' if dataset.source_kind=='synthetic' else '导入的日聚合数据'
+    else:
+        if payload.scope is not None:
+            raise HTTPException(422, '固定样例不支持日期范围筛选')
+        snapshot = calculate(payload.scenario)
     record = AnalysisSession(owner_id=user.id, scenario=payload.scenario, title=snapshot["title"], snapshot=snapshot)
     db.add(record)
     db.flush()
@@ -154,7 +136,7 @@ def simulate_session(session_id: str, payload: Simulation, db: DB, user: Identit
     record = owned(db, user, session_id)
     authorize(user, record.scenario, write=True)
     try:
-        result = simulate(record.scenario, payload.changes)
+        result = simulate_snapshot(record.snapshot, payload.changes)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     db.add(AuditEvent(actor_id=user.id, action="simulation", object_id=record.id, details=result))
@@ -171,6 +153,11 @@ def markdown_report(session_id: str, db: DB, user: Identity):
             f"基期：{b['baseline']}；现期：{b['current']}；差额：{b['delta']} {b['unit']}\n",
             "| 因子 | 贡献量 |\n| --- | ---: |"]
     rows.extend(f"| {f['label']} | {f['contribution']} |" for f in b["factors"])
+    if 'scope' in s:
+        scope=s['scope']
+        rows += ['\n## 数据范围\n',f"类型：{s['data_kind']}；SHA-256：{s.get('data_digest','')}\n",
+                 f"基期：{' 至 '.join(scope['baseline'])}；现期：{' 至 '.join(scope['current'])}\n",
+                 f"筛选：{scope['filters']}；分组：{scope['group_by']}\n"]
     rows += ["\n## 分析边界\n", *s["limitations"], "\n本草稿不包含尚未执行的检验、事件因果证明或收益区间。"]
     db.add(AuditEvent(actor_id=user.id, action="report_exported", object_id=record.id))
     db.commit()

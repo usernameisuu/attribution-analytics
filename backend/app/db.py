@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import create_engine, DateTime, String, ForeignKey, JSON, Index
+from decimal import Decimal
+from sqlalchemy import create_engine, DateTime, String, ForeignKey, JSON, Index, Integer, Numeric, Text, UniqueConstraint, CheckConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .config import settings
 
@@ -54,6 +55,77 @@ class AuditEvent(Base):
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (Index("ix_audit_action_object_time", "action", "object_id", "created_at"),)
+
+
+class DatasetVersion(Base):
+    __tablename__ = 'dataset_versions'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    scenario: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    source_kind: Mapped[str] = mapped_column(String(16),default='imported')
+    digest: Mapped[str] = mapped_column(String(64))
+    rows: Mapped[list] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint('owner_id','scenario','digest',name='uq_dataset_digest'),)
+
+
+class AnalysisRun(Base):
+    __tablename__ = 'analysis_runs'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    session_id: Mapped[str] = mapped_column(ForeignKey('analysis_sessions.id'), index=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    dataset_id: Mapped[str] = mapped_column(ForeignKey('dataset_versions.id'))
+    request_key: Mapped[str] = mapped_column(String(80))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    question: Mapped[str] = mapped_column(String(2000))
+    scope: Mapped[dict] = mapped_column(JSON)
+    parents: Mapped[list] = mapped_column(JSON, default=list)
+    mode: Mapped[str] = mapped_column(String(16), default='rules')
+    status: Mapped[str] = mapped_column(String(24), default='queued')
+    stage: Mapped[str] = mapped_column(String(60), default='queued')
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    fence: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        UniqueConstraint('owner_id','request_key',name='uq_run_request'),
+        Index('uq_run_active_session','session_id',unique=True,postgresql_where=text("status IN ('queued','running')")),
+    )
+
+
+class RunEvent(Base):
+    __tablename__ = 'run_events'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    run_id: Mapped[str] = mapped_column(ForeignKey('analysis_runs.id'), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint('run_id','sequence',name='uq_run_event'),)
+
+
+class BudgetAccount(Base):
+    __tablename__ = 'budget_accounts'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    limit_cny: Mapped[Decimal] = mapped_column(Numeric(18,8), default=Decimal('25'))
+    spent_cny: Mapped[Decimal] = mapped_column(Numeric(18,8), default=Decimal('0'))
+    reserved_cny: Mapped[Decimal] = mapped_column(Numeric(18,8), default=Decimal('0'))
+    __table_args__ = (CheckConstraint('limit_cny>=0 AND spent_cny>=0 AND reserved_cny>=0',name='ck_budget_nonnegative'),)
+
+
+class ModelCall(Base):
+    __tablename__ = 'model_calls'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    run_id: Mapped[str] = mapped_column(ForeignKey('analysis_runs.id'))
+    state: Mapped[str] = mapped_column(String(24), default='reserved')
+    reserved_cny: Mapped[Decimal] = mapped_column(Numeric(18,8))
+    actual_cny: Mapped[Decimal | None] = mapped_column(Numeric(18,8), nullable=True)
+    price_version: Mapped[str] = mapped_column(String(80))
+    usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 engine = create_engine(settings().database_url, pool_pre_ping=True)

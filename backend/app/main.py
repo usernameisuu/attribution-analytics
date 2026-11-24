@@ -12,9 +12,11 @@ from .domain.scenarios import SCENARIOS, calculate
 from .domain.exploration import analyze, default_scope, simulate_snapshot
 from .access import DB, Identity, COOKIE, authorize, owned
 from .pipeline_api import router as pipeline_router, dataset_owned
+from .event_api import router as event_router
 
 app = FastAPI(title="经营归因分析系统", version="0.2.0")
 app.include_router(pipeline_router)
+app.include_router(event_router)
 DUMMY_PASSWORD = password_hash(secrets.token_urlsafe(32))
 
 
@@ -23,7 +25,9 @@ async def request_boundary(request: Request, call_next):
     request_id = str(uuid4())
     request.state.request_id = request_id
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
-        if request.headers.get("origin") != settings().public_origin.rstrip("/"):
+        config = settings()
+        allowed_origins = {origin.rstrip("/") for origin in [config.public_origin, *config.additional_public_origins] if origin}
+        if request.headers.get("origin") not in allowed_origins:
             return JSONResponse({"code":"ORIGIN_REJECTED", "message":"请求来源无效", "request_id":request_id}, status_code=403)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id

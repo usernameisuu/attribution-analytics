@@ -1,10 +1,12 @@
 """Requires migrated PostgreSQL; intentionally separate from local pure tests."""
 import secrets
 import unittest
+from integration_guard import check_target
+check_target()
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from app.main import app
-from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent, DatasetVersion, AnalysisRun, RunEvent, ModelCall
+from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent, DatasetVersion, AnalysisRun, RunEvent, ModelCall, BusinessEvent
 from app.security import password_hash
 from app.config import settings
 
@@ -37,6 +39,7 @@ class ApiTests(unittest.TestCase):
             db.execute(delete(AnalysisRun).where(AnalysisRun.owner_id.in_(ids)))
             db.execute(delete(AnalysisSession).where(AnalysisSession.owner_id.in_(ids)))
             db.execute(delete(DatasetVersion).where(DatasetVersion.owner_id.in_(ids)))
+            db.execute(delete(BusinessEvent).where(BusinessEvent.owner_id.in_(ids)))
             db.execute(delete(LoginSession).where(LoginSession.user_id.in_(ids)))
             db.execute(delete(AuditEvent).where(AuditEvent.actor_id.in_(ids)))
             db.execute(delete(User).where(User.id.in_(ids))); db.commit()

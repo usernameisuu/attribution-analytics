@@ -2,6 +2,8 @@
 import json
 import secrets
 import unittest
+from integration_guard import check_target
+check_target()
 from datetime import timedelta
 from decimal import Decimal as D
 from unittest.mock import patch
@@ -138,6 +140,28 @@ class PipelineTests(unittest.TestCase):
         payload['content']=json.dumps(facts()+facts())
         self.assertEqual(self.client.post('/api/v1/datasets',json=payload).status_code,422)
         self.assertEqual(self.client.get('/api/v1/admin/budget').status_code,403)
+
+    def test_private_business_events_match_scope_and_window(self):
+        _, session = self.setup_dataset()
+        payload = dict(scenario='ecommerce', title='华东活动', start='2026-10-01', end='2026-10-01',
+                       source='活动日历', scope={'region': ['华东']})
+        created = self.client.post('/api/v1/business-events', json=payload)
+        self.assertEqual(created.status_code, 201, created.text)
+        event_id = created.json()['id']
+        payload['title'] = '更新后的活动'
+        self.assertEqual(self.client.put(f'/api/v1/business-events/{event_id}', json=payload).json()['title'], '更新后的活动')
+        payload['scope'] = {'region': ['华北']}
+        self.assertEqual(self.client.post('/api/v1/business-events', json=payload).status_code, 201)
+        payload['scope'] = {'invalid': ['华东']}
+        self.assertEqual(self.client.post('/api/v1/business-events', json=payload).status_code, 422)
+        events = self.client.get(f'/api/v1/sessions/{session}/business-events')
+        self.assertEqual(events.status_code, 200, events.text)
+        self.assertEqual(len(events.json()['events']), 2)  # Session is not region-filtered.
+        self.authenticate(self.other.username)
+        self.assertEqual(self.client.get(f'/api/v1/sessions/{session}/business-events').status_code, 404)
+        self.assertEqual(self.client.delete(f'/api/v1/business-events/{event_id}').status_code, 404)
+        self.authenticate(self.user.username)
+        self.assertEqual(self.client.delete(f'/api/v1/business-events/{event_id}').status_code, 204)
 
     def test_budget_unknown_usage_and_cap_are_persistent(self):
         from datetime import date

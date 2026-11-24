@@ -57,6 +57,19 @@ class AuditEvent(Base):
     __table_args__ = (Index("ix_audit_action_object_time", "action", "object_id", "created_at"),)
 
 
+class BusinessEvent(Base):
+    __tablename__ = 'business_events'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    scenario: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    start: Mapped[str] = mapped_column(String(10))
+    end: Mapped[str] = mapped_column(String(10))
+    scope: Mapped[dict] = mapped_column(JSON)
+    source: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class DatasetVersion(Base):
     __tablename__ = 'dataset_versions'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)

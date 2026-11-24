@@ -2,8 +2,11 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml ./
+COPY uv.lock ./
 COPY app ./app
-RUN pip install --no-cache-dir . && useradd --uid 10001 --create-home appuser
+COPY --from=ghcr.io/astral-sh/uv:0.12.11 /uv /uvx /bin/
+RUN uv sync --locked --no-dev --no-editable && useradd --uid 10001 --create-home appuser
+ENV PATH="/app/.venv/bin:$PATH"
 COPY alembic.ini ./
 COPY migrations ./migrations
 USER 10001

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ATTRIBUTION_", extra="ignore")
     database_url: str
     public_origin: str = "http://localhost:8080"
+    additional_public_origins: list[str] = Field(default_factory=list)
     secure_cookie: bool = True
     session_hours: int = 8
     deepseek_key: SecretStr | None = Field(default=None, validation_alias='DEEPSEEK_API_KEY')

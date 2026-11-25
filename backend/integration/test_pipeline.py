@@ -7,7 +7,8 @@ check_target()
 from datetime import timedelta
 from decimal import Decimal as D
 from unittest.mock import patch
-from sqlalchemy import select
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError
 import test_api
 from app.db import SessionFactory, AnalysisRun, User, BudgetAccount, ModelCall, utcnow
 from app.queue import claim, current
@@ -133,6 +134,21 @@ class PipelineTests(unittest.TestCase):
         with SessionFactory() as db:
             self.assertEqual(db.get(AnalysisRun,run_id).status,'failed')
 
+    def test_authorization_is_locked_until_task_transaction_finishes(self):
+        _, session = self.setup_dataset()
+        self.submit(session)
+        task = self.claim_one()
+        with SessionFactory.begin() as holder:
+            self.assertIsNotNone(current(holder,*task))
+            with self.assertRaises(DBAPIError):
+                with SessionFactory.begin() as contender:
+                    contender.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                    contender.execute(update(User).where(User.id == self.user.id).values(domains=[]))
+        with SessionFactory.begin() as db:
+            db.get(User,self.user.id).domains=[]
+        with SessionFactory.begin() as db:
+            self.assertIsNone(current(db,*task))
+
     def test_api_validation_and_duplicate_import(self):
         dataset,_=self.setup_dataset()
         payload=dict(scenario='ecommerce',name='同内容',format='json',content=json.dumps(facts()))
@@ -149,7 +165,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201, created.text)
         event_id = created.json()['id']
         payload['title'] = '更新后的活动'
-        self.assertEqual(self.client.put(f'/api/v1/business-events/{event_id}', json=payload).json()['title'], '更新后的活动')
+        updated = self.client.put(f'/api/v1/business-events/{event_id}', json={**payload, 'revision':created.json()['revision']}).json()
+        self.assertEqual(updated['title'], '更新后的活动')
         payload['scope'] = {'region': ['华北']}
         self.assertEqual(self.client.post('/api/v1/business-events', json=payload).status_code, 201)
         payload['scope'] = {'invalid': ['华东']}
@@ -159,9 +176,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(events.json()['events']), 2)  # Session is not region-filtered.
         self.authenticate(self.other.username)
         self.assertEqual(self.client.get(f'/api/v1/sessions/{session}/business-events').status_code, 404)
-        self.assertEqual(self.client.delete(f'/api/v1/business-events/{event_id}').status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/v1/business-events/{event_id}?revision={updated['revision']}").status_code, 404)
         self.authenticate(self.user.username)
-        self.assertEqual(self.client.delete(f'/api/v1/business-events/{event_id}').status_code, 204)
+        self.assertEqual(self.client.delete(f"/api/v1/business-events/{event_id}?revision={updated['revision']}").status_code, 204)
 
     def test_budget_unknown_usage_and_cap_are_persistent(self):
         from datetime import date

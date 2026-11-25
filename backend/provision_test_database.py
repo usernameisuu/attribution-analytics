@@ -1,11 +1,15 @@
 """Create only the dedicated test role/database on the specified development VM.
 
-The operator supplies ATTRIBUTION_TEST_ADMIN_DATABASE_URL in the ignored file
-backend/.env.test-admin. The URL must use a PostgreSQL administrator account.
+The operator supplies ATTRIBUTION_TEST_ADMIN_DATABASE_URL and
+ATTRIBUTION_TEST_ROLE_PASSWORD in the ignored file backend/.env.test-admin.
+The URL must use a PostgreSQL administrator account. Check the database
+server's statement and extension logging policies before running: role DDL
+may be logged by the server independently of this script.
 No existing role, password, database, grant or data is altered.
 """
 from pathlib import Path
 from dotenv import dotenv_values
+from psycopg import sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
@@ -14,9 +18,13 @@ def main():
     path = Path(__file__).resolve().parent / '.env.test-admin'
     if not path.is_file():
         raise SystemExit('Missing backend/.env.test-admin; provide the test provisioning administrator URL locally.')
-    raw = dotenv_values(path).get('ATTRIBUTION_TEST_ADMIN_DATABASE_URL')
+    configuration = dotenv_values(path)
+    raw = configuration.get('ATTRIBUTION_TEST_ADMIN_DATABASE_URL')
     if not raw:
         raise SystemExit('Missing ATTRIBUTION_TEST_ADMIN_DATABASE_URL.')
+    password = configuration.get('ATTRIBUTION_TEST_ROLE_PASSWORD')
+    if not password or len(password) < 24 or len(password) > 128:
+        raise SystemExit('Provide a randomly generated test role password of 24–128 characters locally.')
     try:
         url = make_url(raw)
         if (url.drivername != 'postgresql+psycopg' or url.host != '192.168.100.101'
@@ -32,7 +40,9 @@ def main():
                 exists = connection.execute(text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='attribution_test'), EXISTS (SELECT 1 FROM pg_database WHERE datname='attribution_test')")).one()
                 if any(exists):
                     raise RuntimeError('test role or database already exists; stopped without changes')
-                connection.exec_driver_sql("CREATE ROLE attribution_test LOGIN PASSWORD 'attribution_test'")
+                statement = sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(
+                    sql.Identifier('attribution_test'), sql.Literal(password))
+                connection.connection.driver_connection.execute(statement)
                 print('Created dedicated test role.')
                 try:
                     connection.exec_driver_sql('CREATE DATABASE attribution_test OWNER attribution_test')

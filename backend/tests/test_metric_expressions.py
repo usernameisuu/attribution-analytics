@@ -1,6 +1,7 @@
 import unittest
 from decimal import Decimal
-from app.domain.metric_expressions import evaluate
+from app.domain.metric_expressions import evaluate, validate_definitions
+from app.domain.metric_catalog import catalog
 
 
 def ref(name): return {'ref': name}
@@ -32,3 +33,33 @@ class MetricExpressionTests(unittest.TestCase):
         for definitions, inputs, target in cases:
             with self.subTest(target=target, definitions=definitions), self.assertRaises(ValueError):
                 evaluate(definitions, inputs, target)
+
+    def test_validate_every_definition_without_requiring_values(self):
+        self.assertEqual(validate_definitions(self.definitions)['margin'], {})
+        bad = {**self.definitions, 'orphan': {'unit': {}, 'expression': ref('missing')}}
+        with self.assertRaisesRegex(ValueError, 'unknown metric'):
+            validate_definitions(bad)
+        bad = {**self.definitions, 'orphan': {'unit': {}, 'expression': ref('orphan')}}
+        with self.assertRaisesRegex(ValueError, 'cycle'):
+            validate_definitions(bad)
+        bad = {**self.definitions, 'orphan': {'unit': {}, 'expression': ref('revenue')}}
+        with self.assertRaisesRegex(ValueError, 'unit'):
+            validate_definitions(bad)
+
+    def test_builtin_formulas_match_hand_calculated_examples(self):
+        definitions = catalog('ecommerce')['definitions']
+        inputs = {'visits': '100000', 'orders': '5000', 'sales_amount': '1000000',
+                  'material_cost': '500000', 'logistics_cost': '100000',
+                  'commission_cost': '50000', 'other_cost': '100000', 'tax_cost': '0'}
+        self.assertEqual(evaluate(definitions, inputs, 'gmv_from_factors')['value'], Decimal('1000000'))
+        self.assertEqual(evaluate(definitions, inputs, 'sample_net_profit')['value'], Decimal('250000'))
+        self.assertEqual(evaluate(definitions, inputs, 'sample_net_margin')['value'], Decimal('.25'))
+        self.assertEqual(catalog('consumer')['version'], catalog('ecommerce')['version'])
+        definitions['sales_amount']['unit']['cny'] = 99
+        self.assertEqual(catalog('ecommerce')['definitions']['sales_amount']['unit']['cny'], 1)
+
+    def test_static_validation_does_not_pretend_zero_denominators_are_valid(self):
+        definitions = catalog('ecommerce')['definitions']
+        validate_definitions(definitions)
+        with self.assertRaisesRegex(ValueError, 'division by zero'):
+            evaluate(definitions, {'visits': '0', 'orders': '0', 'sales_amount': '0'}, 'gmv_from_factors')

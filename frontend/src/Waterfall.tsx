@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
-import * as echarts from 'echarts';
+import { echarts } from './charts';
 import type { Breakdown } from './api';
+import { formatNumber } from './formatNumber';
 
 export function Waterfall({ breakdown: b }: { breakdown: Breakdown }) {
   const element = useRef<HTMLDivElement>(null);
@@ -8,19 +9,19 @@ export function Waterfall({ breakdown: b }: { breakdown: Breakdown }) {
     if (!element.current) return;
     const chart = echarts.init(element.current);
     let running = Number(b.baseline);
-    const items: { name: string; value: [number, number, number]; itemStyle: { color: string } }[] = [];
-    items.push({name:'基期', value:[0,0,running], itemStyle:{color:'#283d56'}});
+    const items: { name: string; raw:string; value: [number, number, number]; itemStyle: { color: string } }[] = [];
+    items.push({name:'基期', raw:b.baseline, value:[0,0,running], itemStyle:{color:'#283d56'}});
     b.factors.forEach((f, i) => {
       const next = running + Number(f.contribution);
-      items.push({name:f.label, value:[i+1, running, next], itemStyle:{color:Number(f.contribution)>=0?'#0b857a':'#cb5867'}});
+      items.push({name:f.label, raw:f.contribution, value:[i+1, running, next], itemStyle:{color:Number(f.contribution)>=0?'#0b857a':'#cb5867'}});
       running = next;
     });
-    items.push({name:'现期', value:[items.length,0,Number(b.current)], itemStyle:{color:'#283d56'}});
+    items.push({name:'现期', raw:b.current, value:[items.length,0,Number(b.current)], itemStyle:{color:'#283d56'}});
     chart.setOption({
       animation: false, grid: {left:65,right:16,top:20,bottom:60},
       tooltip: { trigger: 'item', formatter: (p: unknown) => {
-        const point = p as {name:string; data:{value:number[]}};
-        return `${point.name}: ${(point.data.value[2]-point.data.value[1]).toLocaleString('zh-CN', {maximumFractionDigits:2})} ${b.unit}`;
+        const point = p as {name:string; data:{raw:string}};
+        return `${point.name}: ${formatNumber(point.data.raw)} ${b.unit}`;
       }},
       xAxis: {type:'category', data:items.map(i=>i.name), axisLabel:{interval:0,rotate:25,fontSize:12}},
       yAxis: {type:'value', axisLabel:{formatter:(n:number)=>Math.abs(n)>=10000?`${(n/10000).toFixed(0)}万`:String(n)}},
@@ -36,5 +37,5 @@ export function Waterfall({ breakdown: b }: { breakdown: Breakdown }) {
     resize.observe(element.current);
     return () => { resize.disconnect(); chart.dispose(); };
   }, [b]);
-  return <div ref={element} className="chart" role="img" aria-label="因子贡献瀑布图，具体数值见下方数据表"/>;
+  return <><div ref={element} className="chart" role="img" aria-label="因子贡献瀑布图，具体数值见下方数据表"/><small>图形使用浮点近似；未舍入数值见报告。</small></>;
 }

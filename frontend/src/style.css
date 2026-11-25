@@ -280,6 +280,27 @@ p {
   font-size:.875rem;
   text-decoration:none
 }
+.report-exports { display:flex; flex-wrap:wrap; gap:12px; margin:20px; font-size:.875rem; }
+.report-exports a { color:#08776b; }
+.metric-drafts textarea { display:block; width:100%; min-height:18rem; padding:10px; font-family:monospace; box-sizing:border-box; }
+.report-preview { overflow-wrap:anywhere; max-height:36rem; overflow:auto; padding:1rem; background:#f6f8f9; font-size:.84rem; line-height:1.5; }
+.report-preview h2, .report-preview h3, .report-preview h4 { margin:1.2em 0 .5em; }
+.report-preview p, .report-print p { margin:.5em 0; }
+.report-table { overflow-x:auto; }
+.report-preview table, .report-print table { width:100%; border-collapse:collapse; font-size:inherit; }
+.report-preview th, .report-preview td, .report-print th, .report-print td { border:1px solid #cfd9df; padding:.4em; text-align:left; overflow-wrap:anywhere; }
+.report-bullet { padding-left:1em; }
+.report-print { display:none; }
+@media print {
+  body:has(.report-print) #root { display:none; }
+  .report-print {
+    display:block; overflow-wrap:anywhere; margin:0;
+    background:white; color:black; font-size:10pt; line-height:1.4;
+  }
+  .report-print h2, .report-print h3, .report-print h4 { break-after:avoid; }
+  .report-print tr { break-inside:avoid; }
+  .report-print .report-table { overflow:visible; }
+}
 .composer {
   margin:24px 20px 20px;
   border-top:1px solid #e9eef4;
@@ -402,6 +423,10 @@ td:not(:first-child),th:not(:first-child) {
   color:#087f75;
   margin:8px 0
 }
+.scenario-draft { margin:12px 0; border:1px solid #dbe5eb; border-radius:8px; }
+.scenario-draft label { display:block; font-size:.85rem; margin:8px 0; }
+.scenario-draft input, .scenario-draft select, .scenario-draft textarea { display:block; width:100%; margin-top:5px; padding:8px; border:1px solid #cfd9e2; border-radius:8px; background:white; }
+.scenario-draft input[type=checkbox] { display:inline-block; width:auto; margin:0 6px 0 0; padding:0; }
 .empty {
   padding:64px 24px;
   text-align:center;
@@ -499,6 +524,21 @@ footer {
 .conversation-log article { margin:12px 0; padding:12px; background:#f4f7fa; border-radius:8px; overflow-wrap:anywhere; }
 .conversation-log p { margin:8px 0; font-size:.85rem; }
 .scope-table { margin-top:20px; }
+.hypotheses { margin:24px 20px; border-top:1px solid #e9eef4; padding-top:18px; }
+.hypotheses h3 { margin:0; font-size:1rem; }
+.hypotheses p, .hypotheses summary { font-size:.85rem; line-height:1.6; }
+.hypotheses details { padding:10px 0; border-bottom:1px solid #edf0f5; }
+.hypotheses summary { cursor:pointer; }
+.hypotheses summary span { color:#8a6624; white-space:nowrap; }
+.drilldown-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
+.drilldown-heading button, .scope-table th button, .scope-table td button { font-size:.8rem; padding:4px 8px; }
+.scope-table th button { border:0; background:transparent; color:inherit; }
+.drilldown-child td:first-child { padding-left:34px; }
+.trend-section { margin:24px 20px; border-top:1px solid #e9eef4; padding-top:16px; }
+.trend-section h3 { font-size:1rem; margin:0; }
+.trend-section p, .trend-section summary { font-size:.85rem; }
+.trend-section summary { cursor:pointer; color:#08776b; }
+.trend-section .table-wrap { max-height:240px; overflow:auto; padding:0; }
 @media(min-width:1800px) {
   .shell {
   max-width:1900px;

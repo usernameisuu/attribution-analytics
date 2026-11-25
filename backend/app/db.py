@@ -46,6 +46,75 @@ class AnalysisSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ReportArchive(Base):
+    __tablename__ = 'report_archives'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    owner_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    session_id: Mapped[str] = mapped_column(ForeignKey('analysis_sessions.id'))
+    scenario: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(160))
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index('ix_report_archives_owner_session_created', 'owner_id', 'session_id', 'created_at'),)
+
+
+class ReportPublication(Base):
+    __tablename__ = 'report_publications'
+    report_id: Mapped[str] = mapped_column(ForeignKey('report_archives.id'), primary_key=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    active: Mapped[bool] = mapped_column(default=True)
+
+
+class ReportComment(Base):
+    __tablename__ = 'report_comments'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    report_id: Mapped[str] = mapped_column(ForeignKey('report_archives.id'))
+    author_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    body: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index('ix_report_comments_report_created', 'report_id', 'created_at', 'id'),)
+
+
+class BriefSubscription(Base):
+    __tablename__ = 'brief_subscriptions'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    scenario: Mapped[str] = mapped_column(String(40))
+    frequency: Mapped[str] = mapped_column(String(10))
+    active: Mapped[bool] = mapped_column(default=True)
+    last_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    next_due: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint('user_id', 'scenario', name='uq_brief_subscription_user_scenario'),
+                      Index('ix_brief_subscription_due', 'active', 'next_due'))
+
+
+class BriefIssue(Base):
+    __tablename__ = 'brief_issues'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    subscription_id: Mapped[str] = mapped_column(ForeignKey('brief_subscriptions.id'))
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    report_ids: Mapped[list] = mapped_column(JSON)
+    truncated: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index('ix_brief_issue_subscription_created', 'subscription_id', 'created_at'),)
+
+
+class MetricDraft(Base):
+    __tablename__ = 'metric_drafts'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    author_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
+    scenario: Mapped[str] = mapped_column(String(40))
+    name: Mapped[str] = mapped_column(String(120))
+    definitions: Mapped[dict] = mapped_column(JSON)
+    digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index('ix_metric_drafts_scenario_created', 'scenario', 'created_at'),)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)

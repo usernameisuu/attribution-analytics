@@ -13,6 +13,7 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(D(data["delta"]), -352000)
         self.assertLess(abs(D(data["residual"])), D("1e-15"))
         self.assertGreater(D(data["factors"][0]["contribution"]), 0)
+        self.assertEqual(data["factors"][0]["label"], "访问次数")
 
     def test_profit_fixture(self):
         data = calculate("consumer")
@@ -24,6 +25,15 @@ class AttributionTests(unittest.TestCase):
         self.assert_conserved(result)
         self.assertNotEqual(result.factors[0].contribution, 0)
         self.assertIsNone(result.as_dict()["factors"][0]["contribution_rate"])
+
+    def test_small_nonzero_change_has_a_contribution_rate(self):
+        result = additive({'a': '1', 'b': '1'},
+                          {'a': '1.000000000000000000000000000000000001', 'b': '1'},
+                          {'a': 1, 'b': 1}, {})
+        values = result.as_dict()
+        self.assertEqual(D(values['delta']), D('1e-36'))
+        self.assertEqual(D(values['factors'][0]['contribution_rate']), D(1))
+        self.assertEqual(D(values['factors'][1]['contribution_rate']), D(0))
 
     def test_zero_and_negative_fallback(self):
         for base,current in [({"a":0,"b":2},{"a":4,"b":3}),({"a":-2,"b":3},{"a":4,"b":5})]:

@@ -1,10 +1,14 @@
 import copy
 import re
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal as D
 from .datasets import DIMENSIONS, MEASURES
-from .attribution import multiplicative, additive, shapley, ratio_slices, number
+from .attribution import multiplicative, additive, shapley, ratio_slices, number, calculation_precision, validate_input_precision
 from .scenarios import SCENARIOS
+from .metric_catalog import VERSION as METRIC_DEFINITION_VERSION
+from .hypotheses import candidates
+from .descriptive import observations
 
 
 def default_scope(rows: list[dict]) -> dict:
@@ -85,8 +89,31 @@ def select_rows(rows, scope, period):
     return [r for r in rows if start <= r['date'] <= end and all(r[k] == v for k,v in scope['filters'].items())]
 
 
+@calculation_precision
 def totals(rows):
-    return {k: sum((D(r[k]) for r in rows), D(0)) for k in MEASURES}
+    values = {k:D(0) for k in MEASURES}
+    for row in rows:
+        for key in MEASURES:
+            value = D(row[key])
+            validate_input_precision(value)
+            values[key] += value
+    return values
+
+
+@calculation_precision
+def group_totals(rows, dimension):
+    """Aggregate once per row, rather than rescanning for every group."""
+    grouped = {}
+    for row in rows:
+        group = row[dimension]
+        if group not in grouped:
+            grouped[group] = {key: D(0) for key in MEASURES}
+        values = grouped[group]
+        for key in MEASURES:
+            value = D(row[key])
+            validate_input_precision(value)
+            values[key] += value
+    return grouped
 
 
 def factor_values(scenario, values):
@@ -101,6 +128,7 @@ def profit(values):
     return values['revenue']-sum(values[k] for k in ('material','logistics','commission','other','tax'))
 
 
+@calculation_precision
 def analyze(scenario: str, rows: list[dict], scope: dict, version: str) -> dict:
     scope = validate_scope(scope, rows)
     selected = {p: select_rows(rows, scope, p) for p in ('baseline','current')}
@@ -111,49 +139,109 @@ def analyze(scenario: str, rows: list[dict], scope: dict, version: str) -> dict:
     labels = {**SCENARIOS[scenario]['labels'], 'visitors':'访问次数'}
     if scenario == 'ecommerce':
         breakdown = multiplicative(factors['baseline'], factors['current'], labels)
+        # The original totals are authoritative; ratios can have repeating decimals.
+        breakdown = replace(breakdown, baseline=summed['baseline']['revenue'], current=summed['current']['revenue'])
     else:
         breakdown = additive(factors['baseline'], factors['current'], {k:1 if k == 'revenue' else -1 for k in factors['baseline']}, labels)
     dimension = scope['group_by']
+    secondary_dimension = 'region' if dimension != 'region' else 'channel'
+    grouped = {}
+    for period, rows_in_period in selected.items():
+        for row in rows_in_period:
+            key = (row[dimension], row[secondary_dimension])
+            values = grouped.setdefault(key, {'baseline': D(0), 'current': D(0)})
+            amount = D(row['revenue']) if scenario == 'ecommerce' else (
+                D(row['revenue']) - sum((D(row[field]) for field in ('material','logistics','commission','other','tax')), D(0))
+            )
+            values[period] += amount
+    children_by_parent = {}
+    for (parent, child), amounts in sorted(grouped.items()):
+        child_delta = amounts['current'] - amounts['baseline']
+        children_by_parent.setdefault(parent, []).append(dict(
+            dimension=secondary_dimension, value=child,
+            baseline=str(amounts['baseline']), current=str(amounts['current']), delta=str(child_delta),
+            contribution_rate=str(child_delta/breakdown.delta) if breakdown.delta else None,
+        ))
     cells = []
     ratio_pairs = {p:{} for p in selected}
-    for value in sorted({r[dimension] for r in (*selected['baseline'],*selected['current'])}):
-        values = {p: totals([r for r in group if r[dimension] == value]) for p,group in selected.items()}
+    grouped_totals = {p: group_totals(group, dimension) for p,group in selected.items()}
+    empty_totals = {key: D(0) for key in MEASURES}
+    for value in sorted(set(grouped_totals['baseline']) | set(grouped_totals['current'])):
+        values = {p: grouped_totals[p].get(value, empty_totals) for p in selected}
         b,c = (v['revenue'] if scenario == 'ecommerce' else profit(v) for v in values.values())
-        cells.append(dict(dimension=dimension, value=value, baseline=str(b), current=str(c), delta=str(c-b), contribution_rate=str((c-b)/breakdown.delta) if breakdown.delta else None))
+        cells.append(dict(dimension=dimension, value=value, baseline=str(b), current=str(c), delta=str(c-b), contribution_rate=str((c-b)/breakdown.delta) if breakdown.delta else None, children=children_by_parent[value]))
         for p,v in values.items(): ratio_pairs[p][value] = (profit(v),v['revenue'])
     trends = []
     for p,group in selected.items():
-        for day in sorted({r['date'] for r in group}):
-            v = totals([r for r in group if r['date'] == day])
+        daily = group_totals(group, 'date')
+        for day, v in sorted(daily.items()):
             trends.append(dict(date=day, period=p, value=str(v['revenue'] if scenario == 'ecommerce' else profit(v)), spend=str(v['spend']), visits=str(v['visitors'])))
     result = dict(scenario_id=scenario,title=SCENARIOS[scenario]['name'],metric=SCENARIOS[scenario]['metric'],
-                  dataset_version=version,algorithm_version='decimal-v2',data_kind='版本化日聚合数据',
+                  dataset_version=version,algorithm_version='decimal-v4',metric_definition_version=METRIC_DEFINITION_VERSION,data_kind='版本化日聚合数据',
                   breakdown=breakdown.as_dict(), scope=scope, drilldown=cells, trends=trends,
+                  hypotheses=observations(candidates(scenario, breakdown), selected),
                   parameters={k:str(v) for k,v in factors['current'].items()},
                   evidence_status='数学分解已完成，统计验证待执行',limitations=['访问次数可加总，不代表跨日期去重访客。','归因贡献解释数学变化，不直接证明因果。'])
     if scenario == 'consumer':
-        result['margin_breakdown'] = shapley(factors['baseline'],factors['current'],lambda v:100*profit(v)/v['revenue'],labels,'百分点').as_dict()
-        result['dimension_margin'] = ratio_slices(ratio_pairs['baseline'],ratio_pairs['current'],{}).as_dict()
-        result['gross_margin'] = {p:str(100*(v['revenue']-v['material'])/v['revenue']) for p,v in summed.items()}
+        # Profit can be compared even when a period's revenue is zero. A margin
+        # is undefined in that case, so never replace it with 0 or infinity.
+        zero_revenue_periods = [p for p, values in summed.items() if values['revenue'] == 0]
+        result['gross_margin'] = {
+            p: str(100 * (values['revenue'] - values['material']) / values['revenue'])
+            if values['revenue'] else None
+            for p, values in summed.items()
+        }
+        result['gross_margin_definition'] = '样例口径：仅扣除原材料成本；不代表已确认的财务毛利率'
+        result['limitations'].append(result['gross_margin_definition'])
+        if zero_revenue_periods:
+            names = {'baseline': '基期', 'current': '现期'}
+            reason = f"{'、'.join(names[p] for p in zero_revenue_periods)}营收为零，利润率及其贡献无法计算。"
+            result['margin_status'] = {'status': 'not_applicable', 'reason': reason}
+            result['limitations'].append(reason)
+        else:
+            result['margin_breakdown'] = shapley(factors['baseline'],factors['current'],lambda v:100*profit(v)/v['revenue'],labels,'百分点').as_dict()
+            result['dimension_margin'] = ratio_slices(ratio_pairs['baseline'],ratio_pairs['current'],{}).as_dict()
+            result['margin_status'] = {'status': 'available', 'reason': None}
     return result
 
 
+@calculation_precision
 def simulate_snapshot(snapshot: dict, changes: dict) -> dict:
     scenario = snapshot['scenario_id']
-    base = snapshot.get('parameters', SCENARIOS[scenario]['current'])
+    base = snapshot.get('parameters')
+    if base is None:
+        if snapshot.get('dataset_version') != 'prd-fixture-v1':
+            raise ValueError('该快照未记录模拟参数，请重新创建分析')
+        base = SCENARIOS[scenario]['current']
     if not changes or set(changes)-set(base):
         raise ValueError('模拟因子无效')
     values = {k:number(v) for k,v in base.items()}
     for k,v in changes.items():
         value = number(v)
-        if value < 0 or value > D('1e12'):
-            raise ValueError('模拟值超出范围')
-        if k == 'conversion' and value > 1:
-            raise ValueError('当前样例订单转化因子上限为 1')
+        # Calculated current factors may exceed user input precision/range.
+        # Keeping an existing value is not a new hypothetical input.
+        if value != values[k]:
+            validate_input_precision(value)
+            if value < 0 or value > D('1e12'):
+                raise ValueError('模拟值超出范围')
+            if k == 'conversion' and value > 1:
+                raise ValueError('当前样例订单转化因子上限为 1')
         values[k] = value
-    prediction = values['visitors']*values['conversion']*values['basket'] if scenario == 'ecommerce' else profit(values)
-    if scenario == 'consumer' and not values['revenue']:
-        raise ValueError('营收必须大于零')
-    return dict(prediction=str(prediction), improvement=str(prediction-D(snapshot['breakdown']['current'])),
-                parameters={k:str(v) for k,v in values.items()},kind='条件性点估计',interval=None,
-                assumptions='基于本会话数据快照；其他因子不变，不含执行成本。')
+    if all(values[key] == number(base[key]) for key in values):
+        # Derived ratios can repeat; unchanged parameters must reproduce the observed total.
+        prediction = D(snapshot['breakdown']['current'])
+    else:
+        prediction = values['visitors']*values['conversion']*values['basket'] if scenario == 'ecommerce' else profit(values)
+    result = dict(prediction=str(prediction), improvement=str(prediction-D(snapshot['breakdown']['current'])),
+                  parameters={k:str(v) for k,v in values.items()},kind='条件性点估计',interval=None,
+                  assumptions='基于本会话数据快照；未调整的因子保持现期值，不含执行成本，也未估计因子联动。')
+    if scenario == 'consumer':
+        current_revenue = number(base['revenue'])
+        simulated_margin = 100 * prediction / values['revenue'] if values['revenue'] else None
+        current_margin = 100 * D(snapshot['breakdown']['current']) / current_revenue if current_revenue else None
+        reason = ('模拟营收为零，无法计算模拟利润率。' if simulated_margin is None else
+                  '现期营收为零，无法计算较现期的利润率变化。' if current_margin is None else None)
+        result['margin'] = {'prediction':str(simulated_margin) if simulated_margin is not None else None,
+                            'improvement':str(simulated_margin-current_margin) if simulated_margin is not None and current_margin is not None else None,
+                            'reason':reason}
+    return result

@@ -34,6 +34,21 @@ jobs:
           version: '0.12.11'
       - run: uv sync --locked --extra test
       - run: uv run --locked --extra test python -B -m unittest discover -s tests -v
+      - name: Isolated API and SQLite tests
+        env:
+          ATTRIBUTION_DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1/unused
+          ATTRIBUTION_TEST_DATABASE_URL: ""
+        run: >-
+          uv run --locked --extra test python -m pytest -q
+          integration/test_analysis_api_isolated.py
+          integration/test_event_api_isolated.py
+          integration/test_identity_api_isolated.py
+          integration/test_metric_drafts_sqlite.py
+          integration/test_origin_boundary.py
+          integration/test_report_archive_isolated.py
+          integration/test_report_archive_sqlite.py
+          integration/test_run_previous_draft.py
+          integration/test_synthetic_workflows_sqlite.py
       - run: uv run --locked --extra test python run_integration.py
   frontend:
     runs-on: ubuntu-latest
@@ -46,4 +61,5 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci
+      - run: npm test
       - run: npm run build

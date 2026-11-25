@@ -13,3 +13,5 @@ coverage/
 *.egg-info/
 runtime/
 *.log
+*.md
+docs/

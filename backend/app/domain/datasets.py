@@ -7,11 +7,20 @@ import random
 from datetime import date, timedelta
 from decimal import Decimal as D
 from itertools import product
-from .attribution import number
+from .attribution import number, validate_input_precision
 
 DIMENSIONS = ("channel", "region", "category", "segment")
 MEASURES = ("visitors", "orders", "revenue", "material", "logistics", "commission", "other", "tax", "spend")
 FIELDS = ("date", *DIMENSIONS, *MEASURES)
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('JSON 对象包含重复字段，请检查导入数据')
+        result[key] = value
+    return result
 
 
 def normalize(rows: list[dict]) -> tuple[list[dict], str]:
@@ -32,6 +41,8 @@ def normalize(rows: list[dict]) -> tuple[list[dict], str]:
             raise ValueError(f"第 {index} 行存在重复业务键")
         seen.add(key)
         values = {k: number(row[k]) for k in MEASURES}
+        for value in values.values():
+            validate_input_precision(value)
         if any(v < 0 or v > D('1e12') for v in values.values()):
             raise ValueError(f"第 {index} 行数值越界")
         if any(values[k] != values[k].to_integral_value() for k in ('visitors', 'orders')):
@@ -54,7 +65,7 @@ def parse_upload(content: str, format: str) -> tuple[list[dict], str]:
     if len(content.encode()) > 10_000_000:
         raise ValueError("导入内容不能超过 10 MB")
     if format == 'json':
-        rows = json.loads(content,parse_float=str,parse_int=str)
+        rows = json.loads(content, parse_float=str, parse_int=str, object_pairs_hook=_unique_json_object)
     elif format == 'csv':
         reader = csv.DictReader(io.StringIO(content.lstrip('\ufeff')))
         if not reader.fieldnames or len(reader.fieldnames)!=len(set(reader.fieldnames)):

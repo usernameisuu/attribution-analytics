@@ -23,11 +23,14 @@ def identity(request: Request, db: DB) -> User:
     login = db.get(LoginSession, token_hash(raw)) if raw else None
     if not login or login.expires_at <= utcnow():
         raise HTTPException(401, '请先登录')
-    user = db.get(User, login.user_id)
-    if not user or not user.active:
-        raise HTTPException(401, '账号已停用')
     if request.method not in {'GET','HEAD'} and not hmac.compare_digest(request.headers.get('x-csrf-token',''),login.csrf):
         raise HTTPException(403, '请求校验失败，请刷新后重试')
+    # Serialize permission and account updates with the authorization check
+    # and the database transaction serving this request.
+    user = db.scalar(select(User).where(User.id == login.user_id)
+                     .with_for_update(read=True).execution_options(populate_existing=True))
+    if not user or not user.active:
+        raise HTTPException(401, '账号已停用')
     request.state.login = login
     return user
 
@@ -35,8 +38,9 @@ def identity(request: Request, db: DB) -> User:
 Identity = Annotated[User, Depends(identity)]
 
 
-def owned(db: Session, user: User, session_id: str) -> AnalysisSession:
-    record = db.scalar(select(AnalysisSession).where(AnalysisSession.id == session_id, AnalysisSession.owner_id == user.id))
+def owned(db: Session, user: User, session_id: str, lock: bool = False) -> AnalysisSession:
+    query = select(AnalysisSession).where(AnalysisSession.id == session_id, AnalysisSession.owner_id == user.id)
+    record = db.scalar(query.with_for_update() if lock else query)
     if not record: raise HTTPException(404, '会话不存在或无权访问')
     authorize(user,record.scenario)
     return record

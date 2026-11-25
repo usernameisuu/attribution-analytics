@@ -4,8 +4,32 @@ from decimal import Decimal, localcontext
 from itertools import combinations
 from math import factorial
 from typing import Callable, Mapping
+from functools import wraps
 
 D = Decimal
+
+
+def calculation_precision(function):
+    """Keep supported input aggregates exact; divisions remain finite-precision estimates."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with localcontext() as context:
+            context.prec = 80
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def validate_input_precision(value: Decimal) -> None:
+    if not value:
+        return
+    _, digits, exponent = value.as_tuple()
+    trailing = 0
+    for digit in reversed(digits):
+        if digit != 0:
+            break
+        trailing += 1
+    if exponent + trailing < -36:
+        raise ValueError('输入数值最多支持 36 位有效小数')
 
 
 def number(value: object) -> Decimal:
@@ -36,9 +60,11 @@ class Breakdown:
     unit: str = "元"
 
     @property
+    @calculation_precision
     def delta(self) -> Decimal:
         return self.current - self.baseline
 
+    @calculation_precision
     def as_dict(self) -> dict:
         # API transmits decimals as strings; rounding belongs to presentation.
         delta = self.delta
@@ -51,7 +77,7 @@ class Breakdown:
             "factors": [dict(key=f.key, label=f.label, baseline=str(f.baseline),
                              current=str(f.current), contribution=str(f.contribution),
                              contribution_rate=str(f.contribution / delta)
-                             if abs(delta) > D("1e-20") else None) for f in self.factors],
+                             if delta != 0 else None) for f in self.factors],
         }
 
 
@@ -60,6 +86,7 @@ def validate_pair(base: Mapping, current: Mapping) -> None:
         raise ValueError("两期必须提供相同且非空的因子集合")
 
 
+@calculation_precision
 def additive(base: Mapping, current: Mapping, coefficients: Mapping,
              labels: Mapping) -> Breakdown:
     validate_pair(base, current)
@@ -90,7 +117,7 @@ def shapley(base: Mapping, current: Mapping, evaluate: Callable,
         raise ValueError("精确因子 Shapley 最多支持 8 个因子，请使用层级分解")
     b, c = ({k: number(v) for k, v in source.items()} for source in (base, current))
     with localcontext() as ctx:
-        ctx.prec = 50
+        ctx.prec = 80
         cache: dict[frozenset, Decimal] = {}
 
         def value(subset: frozenset) -> Decimal:
@@ -122,7 +149,7 @@ def multiplicative(base: Mapping, current: Mapping, labels: Mapping) -> Breakdow
         return Breakdown("shapley_exact_lmdi_not_applicable", result.baseline,
                          result.current, result.factors)
     with localcontext() as ctx:
-        ctx.prec = 50
+        ctx.prec = 80
         y0, y1 = product(b), product(c)
         mean = y0 if y0 == y1 else (y1-y0)/(y1.ln()-y0.ln())
         factors = tuple(Factor(k, labels.get(k, k), b[k], c[k],
@@ -130,6 +157,7 @@ def multiplicative(base: Mapping, current: Mapping, labels: Mapping) -> Breakdow
         return Breakdown("lmdi", y0, y1, factors)
 
 
+@calculation_precision
 def ratio_slices(base: Mapping[str, tuple], current: Mapping[str, tuple],
                  labels: Mapping) -> Breakdown:
     """Two-factor Shapley for N/D, allocated to disjoint additive slices."""
@@ -141,7 +169,7 @@ def ratio_slices(base: Mapping[str, tuple], current: Mapping[str, tuple],
     if d0 <= 0 or d1 <= 0:
         raise ValueError("两期整体分母必须大于零")
     with localcontext() as ctx:
-        ctx.prec = 50
+        ctx.prec = 80
         cn = (1/d0+1/d1)/2
         cd = -(n0+n1)/(2*d0*d1)
         factors = tuple(Factor(k, labels.get(k, k), b[k][0], c[k][0],

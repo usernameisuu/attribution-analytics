@@ -2,26 +2,22 @@
 import asyncio
 import json
 import time
+from copy import deepcopy
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from .access import DB, Identity, authorize, owned, identity, administrator
-from .db import DatasetVersion, AnalysisRun, RunEvent, AuditEvent, SessionFactory, BudgetAccount
+from .db import DatasetVersion, AnalysisSession, AnalysisRun, RunEvent, AuditEvent, SessionFactory, BudgetAccount
 from .domain.datasets import parse_upload, generate, normalize, DIMENSIONS
 from .queue import enqueue, emit, ACTIVE
+from .modules.datasets.access import dataset_owned
+from .modules.analysis.report import markdown_report_text
+from .modules.analysis.snapshot import serialize_session
 
 router = APIRouter(prefix='/api/v1')
-
-
-def dataset_owned(db, user, dataset_id):
-    record = db.get(DatasetVersion, dataset_id)
-    if not record or record.owner_id != user.id:
-        raise HTTPException(404, '数据版本不存在或无权访问')
-    authorize(user, record.scenario)
-    return record
 
 
 def dataset_info(record):
@@ -106,7 +102,8 @@ def run_owned(db, user, run_id, lock=False):
 def run_info(run):
     return dict(id=run.id, session_id=run.session_id, question=run.question, mode=run.mode,
                 status=run.status, stage=run.stage, sequence=run.sequence, attempts=run.attempts,
-                error=run.error, created_at=run.created_at.isoformat())
+                error=run.error, created_at=run.created_at.isoformat(),
+                has_previous_drafts=bool(run.result and run.result.get('previous_snapshot')))
 
 
 @router.post('/sessions/{session_id}/runs', status_code=202)
@@ -138,6 +135,41 @@ def runs(session_id: str, db: DB, user: Identity):
 def get_run(run_id: str, db: DB, user: Identity):
     run = run_owned(db,user,run_id)
     return {**run_info(run), 'result':run.result}
+
+
+@router.get('/runs/{run_id}/previous-draft.md')
+def previous_draft_report(run_id: str, db: DB, user: Identity):
+    run = run_owned(db, user, run_id)
+    snapshot = (run.result or {}).get('previous_snapshot')
+    if not snapshot:
+        raise HTTPException(404, '该任务没有保留先前草稿')
+    content = ('> 追问前的已保存草稿快照；未重新匹配业务事件。\n\n' + markdown_report_text(snapshot))
+    db.add(AuditEvent(actor_id=user.id, action='previous_draft_exported', object_id=run.id,
+                      details={'session_id':run.session_id, 'format':'markdown'}))
+    db.commit()
+    return PlainTextResponse(content, headers={'Content-Disposition':f'attachment; filename="previous-draft-{run.id}.md"'})
+
+
+@router.post('/runs/{run_id}/restore-previous-draft', status_code=201)
+def restore_previous_draft(run_id: str, db: DB, user: Identity):
+    run = run_owned(db, user, run_id)
+    dataset = dataset_owned(db, user, run.dataset_id)
+    authorize(user, dataset.scenario, write=True)
+    snapshot = (run.result or {}).get('previous_snapshot')
+    if not snapshot:
+        raise HTTPException(404, '该任务没有保留先前草稿')
+    if (snapshot.get('scenario_id') != dataset.scenario or snapshot.get('dataset_version') != dataset.id
+            or snapshot.get('data_digest') != dataset.digest):
+        raise HTTPException(409, '草稿对应的数据版本不一致，无法恢复')
+    record = AnalysisSession(owner_id=user.id, scenario=dataset.scenario,
+                             title=snapshot['title'], snapshot=deepcopy(snapshot))
+    db.add(record)
+    db.flush()
+    db.add(AuditEvent(actor_id=user.id, action='previous_draft_restored', object_id=record.id,
+                      details={'source_run_id':run.id, 'source_session_id':run.session_id,
+                               'dataset_version':dataset.id, 'data_digest':dataset.digest}))
+    db.commit()
+    return serialize_session(record)
 
 
 @router.post('/runs/{run_id}/cancel')

@@ -33,7 +33,12 @@ def enqueue(db, user, session, dataset, question, request_key, mode):
 
 
 def authorized(db, run):
-    user, dataset = db.get(User,run.owner_id), db.get(DatasetVersion,run.dataset_id)
+    # Hold a shared row lock until this task transaction ends. Permission or
+    # account updates must then serialize with the authorization check and
+    # any state changes made by the transaction that called current/claim.
+    user = db.scalar(select(User).where(User.id == run.owner_id)
+                     .with_for_update(read=True).execution_options(populate_existing=True))
+    dataset = db.get(DatasetVersion,run.dataset_id)
     return bool(user and user.active and user.role=='analyst' and dataset and dataset.owner_id==user.id and dataset.scenario in user.domains)
 
 

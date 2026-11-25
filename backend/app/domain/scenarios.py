@@ -1,13 +1,14 @@
 """Frozen PRD arithmetic fixtures. These are not statistical or causal evidence."""
 from decimal import Decimal as D
 from .attribution import additive, multiplicative, number, shapley
+from .metric_catalog import VERSION as METRIC_DEFINITION_VERSION
 
 SCENARIOS = {
     "ecommerce": {
         "name": "电商 GMV 下滑", "metric": "GMV", "domain": "ecommerce",
         "baseline": {"visitors": "100000", "conversion": "0.05", "basket": "200"},
         "current": {"visitors": "120000", "conversion": "0.03", "basket": "180"},
-        "labels": {"visitors": "访客数", "conversion": "订单转化因子", "basket": "客单价"},
+        "labels": {"visitors": "访问次数", "conversion": "订单转化因子", "basket": "客单价"},
     },
     "consumer": {
         "name": "快消品利润异动", "metric": "净利润", "domain": "consumer",
@@ -28,7 +29,7 @@ def calculate(key: str) -> dict:
         result = additive(scenario["baseline"], scenario["current"],
                           {k: 1 if k == "revenue" else -1 for k in scenario["baseline"]}, scenario["labels"])
     response = dict(scenario_id=key, title=scenario["name"], metric=scenario["metric"],
-                    dataset_version="prd-fixture-v1", algorithm_version="decimal-v1",
+                    dataset_version="prd-fixture-v1", algorithm_version="decimal-v4", metric_definition_version=METRIC_DEFINITION_VERSION,
                     data_kind="固定模拟样例", breakdown=result.as_dict(),
                     evidence_status="仅完成数学分解，尚未执行统计检验",
                     limitations=["固定汇总样例不具备独立统计观测，不能据此输出因果结论。"])
@@ -56,8 +57,6 @@ def simulate(key: str, changes: dict) -> dict:
     if key == "ecommerce":
         prediction = values["visitors"]*values["conversion"]*values["basket"]
     else:
-        if not values["revenue"]:
-            raise ValueError("营收必须大于零")
         prediction = values["revenue"]-sum(v for k,v in values.items() if k != "revenue")
     actual = D(calculate(key)["breakdown"]["current"])
     return dict(prediction=str(prediction), improvement=str(prediction-actual),

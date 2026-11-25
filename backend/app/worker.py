@@ -8,8 +8,16 @@ from .queue import claim, current, emit
 from .domain.datasets import DIMENSIONS
 from .domain.exploration import rule_plan, validate_scope, analyze
 from . import model_gateway
+from .modules.analysis.briefs import generate_due
 
 log = logging.getLogger(__name__)
+
+
+def result_with_previous_drafts(result, snapshot):
+    """Keep the replaced snapshot on the run when it contains saved user work."""
+    if any(snapshot.get(key) for key in ('action_items', 'simulation_scenarios', 'statistical_checks', 'report_note')):
+        return {**result, 'previous_snapshot': snapshot}
+    return result
 
 
 def heartbeat(run_id, fence, stop):
@@ -59,7 +67,7 @@ def process(run_id, fence):
             run = current(db,run_id,fence)
             if not run: return
             session = db.scalar(select(AnalysisSession).where(AnalysisSession.id==run.session_id).with_for_update())
-            run.result, run.status, run.lease_until = result,'succeeded',None
+            run.result, run.status, run.lease_until = result_with_previous_drafts(result, session.snapshot),'succeeded',None
             session.snapshot = result
             emit(db,run,'completed',message='数学分析完成，统计证据状态已明确标注')
             db.add(AuditEvent(actor_id=run.owner_id,action='run_completed',object_id=run.id,
@@ -82,6 +90,20 @@ def finish_error(run_id,fence,message,status):
         emit(db,run,status,message=message)
 
 
+def poll_once():
+    # Briefing failures must not stop analysis work or the lease heartbeat.
+    try:
+        with SessionFactory.begin() as db:
+            generate_due(db)
+    except Exception:
+        log.exception('Briefing polling failed')
+    with SessionFactory.begin() as db:
+        task = claim(db)
+    if task:
+        process(*task)
+    return bool(task)
+
+
 def main():
     import signal
     logging.basicConfig(level=logging.INFO)
@@ -90,10 +112,7 @@ def main():
     signal.signal(signal.SIGINT,lambda *_:stopping.set())
     while not stopping.is_set():
         try:
-            with SessionFactory.begin() as db:
-                task = claim(db)
-            if task: process(*task)
-            else: stopping.wait(2)
+            if not poll_once(): stopping.wait(2)
         except Exception:
             log.exception('Worker polling failed')
             stopping.wait(5)

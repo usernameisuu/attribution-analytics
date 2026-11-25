@@ -4,11 +4,14 @@ import unittest
 from integration_guard import check_target
 check_target()
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.exc import DBAPIError
+from starlette.requests import Request
 from app.main import app
-from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent, DatasetVersion, AnalysisRun, RunEvent, ModelCall, BusinessEvent
+from app.db import SessionFactory, User, LoginSession, AnalysisSession, AuditEvent, DatasetVersion, AnalysisRun, RunEvent, ModelCall, BusinessEvent, ReportArchive, MetricDraft
 from app.security import password_hash
 from app.config import settings
+from app.access import COOKIE, identity
 
 
 class ApiTests(unittest.TestCase):
@@ -37,9 +40,12 @@ class ApiTests(unittest.TestCase):
             db.execute(delete(RunEvent).where(RunEvent.run_id.in_(run_ids)))
             db.execute(delete(ModelCall).where(ModelCall.run_id.in_(run_ids)))
             db.execute(delete(AnalysisRun).where(AnalysisRun.owner_id.in_(ids)))
+            db.execute(delete(ReportArchive).where(ReportArchive.session_id.in_(
+                select(AnalysisSession.id).where(AnalysisSession.owner_id.in_(ids)))))
             db.execute(delete(AnalysisSession).where(AnalysisSession.owner_id.in_(ids)))
             db.execute(delete(DatasetVersion).where(DatasetVersion.owner_id.in_(ids)))
             db.execute(delete(BusinessEvent).where(BusinessEvent.owner_id.in_(ids)))
+            db.execute(delete(MetricDraft).where(MetricDraft.author_id.in_(ids)))
             db.execute(delete(LoginSession).where(LoginSession.user_id.in_(ids)))
             db.execute(delete(AuditEvent).where(AuditEvent.actor_id.in_(ids)))
             db.execute(delete(User).where(User.id.in_(ids))); db.commit()
@@ -48,6 +54,18 @@ class ApiTests(unittest.TestCase):
         response = self.client.post("/api/v1/sessions", json={"scenario":"ecommerce"})
         self.assertEqual(response.status_code, 201)
         return response.json()["id"]
+
+    def test_archive_can_be_created_and_exported(self):
+        identifier = self.create_analysis()
+        from app.modules.analysis.snapshot import report_revision
+        with SessionFactory() as db:
+            revision = report_revision(db.get(AnalysisSession, identifier).snapshot)
+        response = self.client.post(f'/api/v1/sessions/{identifier}/reports', json={'revision': revision})
+        self.assertEqual(response.status_code, 201, response.text)
+        report_id = response.json()['id']
+        self.assertEqual(self.client.get(f'/api/v1/reports/{report_id}/export/md').status_code, 200)
+        self.authenticate(self.other.username)
+        self.assertEqual(self.client.get(f'/api/v1/reports/{report_id}/export/md').status_code, 404)
 
     def test_scope_is_server_enforced(self):
         response = self.client.get("/api/v1/dashboard")
@@ -85,3 +103,30 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/api/v1/sessions/{identifier}").status_code,403)
         self.assertEqual(self.client.post("/api/v1/auth/logout").status_code,204)
         self.assertEqual(self.client.get("/api/v1/me").status_code,401)
+
+    def test_permission_update_waits_for_authorized_request_transaction(self):
+        identifier=self.create_analysis()
+        cookie=self.client.cookies.get(COOKIE)
+        request=Request({'type':'http','method':'GET','path':'/',
+                         'headers':[(b'cookie',f'{COOKIE}={cookie}'.encode())]})
+        with SessionFactory.begin() as holder:
+            self.assertEqual(identity(request,holder).id,self.user.id)
+            with self.assertRaises(DBAPIError):
+                with SessionFactory.begin() as contender:
+                    contender.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                    contender.execute(update(User).where(User.id==self.user.id).values(domains=[]))
+        with SessionFactory.begin() as db:
+            db.get(User,self.user.id).domains=[]
+        self.assertEqual(self.client.get(f'/api/v1/sessions/{identifier}').status_code,403)
+
+    def test_admin_can_create_metric_draft_with_migrated_schema(self):
+        from app.domain.metric_catalog import catalog
+        with SessionFactory.begin() as db:
+            db.get(User,self.user.id).role='admin'
+        payload={'scenario':'ecommerce','name':'测试指标草稿','definitions':catalog('ecommerce')['definitions']}
+        created=self.client.post('/api/v1/admin/metric-drafts',json=payload)
+        self.assertEqual(created.status_code,201,created.text)
+        self.assertEqual(created.json()['status'],'draft')
+        stored=self.client.get('/api/v1/admin/metric-drafts/'+created.json()['id'])
+        self.assertEqual(stored.status_code,200,stored.text)
+        self.assertEqual(stored.json()['definitions'],payload['definitions'])

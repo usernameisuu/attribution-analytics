@@ -46,6 +46,62 @@ def _number(value):
     return result
 
 
+def validate_definitions(definitions):
+    """Validate every metric's references, expression structure and units.
+
+    This does not require data and deliberately does not assert that an
+    expression is numerically defined for every possible input.
+    """
+    if not isinstance(definitions, dict) or not definitions or len(definitions) > 100:
+        raise ValueError('invalid metric definitions')
+    for name in definitions:
+        _name(name)
+    visiting, memo = set(), {}
+    remaining = [1000]
+
+    def metric(name):
+        if name in memo:
+            return memo[name]
+        if name in visiting:
+            raise ValueError('metric cycle')
+        if name not in definitions:
+            raise ValueError('unknown metric reference')
+        definition = definitions[name]
+        if not isinstance(definition, dict) or set(definition) != {'unit', 'expression'}:
+            raise ValueError('invalid metric definition')
+        declared = _unit(definition['unit'])
+        visiting.add(name)
+        actual = declared if definition['expression'] is None else expression(definition['expression'], 0)
+        if actual != declared:
+            raise ValueError('declared unit does not match expression')
+        visiting.remove(name)
+        memo[name] = declared
+        return declared
+
+    def expression(node, depth):
+        remaining[0] -= 1
+        if remaining[0] < 0 or depth > 16 or not isinstance(node, dict):
+            raise ValueError('expression exceeds limits or is invalid')
+        if set(node) == {'ref'}:
+            return metric(_name(node['ref']))
+        if set(node) == {'const'}:
+            _number(node['const'])
+            return {}
+        if (set(node) != {'op', 'args'} or not isinstance(node['op'], str)
+                or node['op'] not in _OPS or not isinstance(node['args'], list) or len(node['args']) != 2):
+            raise ValueError('unsupported expression')
+        left, right = (expression(arg, depth + 1) for arg in node['args'])
+        if node['op'] in ('add', 'sub'):
+            if left != right:
+                raise ValueError('incompatible units')
+            return left
+        return _combine(left, right, 1 if node['op'] == 'mul' else -1)
+
+    for name in definitions:
+        metric(name)
+    return memo
+
+
 def evaluate(definitions, inputs, target):
     """Evaluate a metric and return Decimal value and unit dimensions.
 

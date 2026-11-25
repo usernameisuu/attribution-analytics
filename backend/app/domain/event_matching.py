@@ -2,6 +2,7 @@
 from datetime import date
 
 DIMENSIONS = {'channel', 'region', 'category', 'segment'}
+LABELS = {'channel':'渠道', 'region':'区域', 'category':'品类', 'segment':'客群'}
 
 
 def _day(value):
@@ -58,6 +59,19 @@ def match_events(events, business_line, start, end, filters):
             continue
         if any(key in scope and value not in scope[key] for key, value in filters.items()):
             continue
+        if event_end < start:
+            temporal = f'事件结束距现期开始 {(start-event_end).days} 天'
+        elif event_start > end:
+            temporal = f'事件开始距现期结束 {(event_start-end).days} 天'
+        else:
+            temporal = '事件与现期时间重叠'
+        if filters:
+            dimensions = '；'.join(f"{LABELS[key]}={value}（{'事件范围包含该值' if key in scope else '事件未限定该维度'}）"
+                                  for key,value in sorted(filters.items()))
+            dimensions += '；未筛选的维度未核验重合'
+        else:
+            dimensions = '分析未按维度筛选，未核验维度重合'
         matches.append({**event, 'scope': {key: list(values) for key, values in scope.items()},
+                        'match_basis': f'{temporal}；{dimensions}。',
                         'evidence_status': '候选关联，尚不能证明因果'})
     return sorted(matches, key=lambda item: (item['start'], item['id']))
